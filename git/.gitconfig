@@ -1,0 +1,104 @@
+[user]
+	name = jk1rby
+	email = jameskirby663@gmail.com
+
+[core]
+	editor = nvim
+	autocrlf = input
+	safecrlf = true
+	excludesfile = ~/.gitignore_global
+	quotepath = false
+	precomposeunicode = true
+	trustctime = false
+	filemode = false
+	pager = less -R
+
+[init]
+	defaultBranch = main
+
+[push]
+	default = simple
+	autoSetupRemote = true
+
+[pull]
+	rebase = true
+	ff = only
+
+[merge]
+	tool = nvimdiff
+	conflictstyle = diff3
+	ff = false
+
+[rebase]
+	autosquash = true
+	autostash = true
+
+[fetch]
+	prune = true
+
+[diff]
+	tool = nvimdiff
+	compactionHeuristic = true
+	colorMoved = default
+
+[difftool]
+	prompt = false
+
+[mergetool]
+	prompt = false
+	keepBackup = false
+
+[credential]
+	helper = store
+
+[color]
+	ui = auto
+
+[alias]
+	a = add
+	aa = add --all
+	ap = add --patch
+	b = branch
+	ba = branch -a
+	bd = branch -d
+	c = commit
+	ca = commit -a
+	cam = commit -a -m
+	cm = commit -m
+	co = checkout
+	cob = checkout -b
+	d = diff
+	dc = diff --cached
+	dt = difftool
+	f = fetch
+	m = merge
+	mt = mergetool
+	p = push
+	pf = push --force-with-lease
+	pl = pull
+	r = rebase
+	s = status
+	ss = status -s
+	st = stash
+	stp = stash pop
+	
+	# Log aliases
+	l = log --oneline
+	lg = log --oneline --graph --decorate
+	lga = log --oneline --graph --decorate --all
+	
+	# Advanced operations
+	amend = commit --amend --no-edit
+	amendm = commit --amend
+	wip = commit -am "WIP"
+	unwip = reset HEAD~1
+	
+	# Show information
+	contributors = shortlog --summary --numbered
+	tags = tag -l
+	branches = branch -a
+	remotes = remote -v
+	aliases = config --get-regexp alias
+	
+	# Cleanup
+	cleanup = "!git branch --merged | grep -v '\\*\\|master\\|main\\|develop' | xargs -n 1 git branch -d"

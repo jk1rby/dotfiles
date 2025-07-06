@@ -1,0 +1,289 @@
+# Dotfiles Repository .gitignore
+# Excludes log files and local-specific files from git tracking
+
+# =============================================================================
+# LOG FILES AND DEBUGGING
+# =============================================================================
+*.log
+logs/*.log
+logs/**/*.log
+*.debug
+*.trace
+
+# Script execution logs
+install_*.log
+backup_*.log
+error_*.log
+
+# System logs
+*.journal
+syslog*
+
+# =============================================================================
+# BACKUP DIRECTORIES AND FILES
+# =============================================================================
+.dotfiles_backup_*
+*_backup_*
+*.backup
+*.bak
+*.orig
+*.old
+
+# Temporary backup files created during installation
+*.backup.*
+*~
+
+# =============================================================================
+# PERSONAL/SENSITIVE DATA
+# =============================================================================
+# SSH keys and certificates
+.ssh/
+*.pem
+*.key
+*.crt
+*.cert
+id_rsa*
+id_ed25519*
+
+# GPG keys
+*.gpg
+*.asc
+.gnupg/
+
+# Personal credential files
+.netrc
+.authinfo
+.credentials
+*_credentials
+*_secrets
+.env.local
+.env.private
+
+# =============================================================================
+# CACHE AND TEMPORARY FILES
+# =============================================================================
+# OS-specific cache
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# Editor temporary files
+*.swp
+*.swo
+*~
+.#*
+\#*#
+*.tmp
+*.temp
+
+# Vim specific
+.viminfo
+.vim/swap/
+.vim/backup/
+.vim/undo/
+
+# =============================================================================
+# BUILD AND DEPENDENCY ARTIFACTS
+# =============================================================================
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# =============================================================================
+# DEVELOPMENT AND TESTING
+# =============================================================================
+# Coverage reports
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
+
+# Test artifacts
+test_results/
+test_output/
+*.test
+test-*.log
+
+# =============================================================================
+# LOCAL CONFIGURATION OVERRIDES
+# =============================================================================
+# Local customizations that shouldn't be shared
+.zshrc.local
+.bashrc.local
+.vimrc.local
+.gitconfig.local
+config.local
+*.local
+
+# Machine-specific configurations
+.env
+.envrc
+local_settings.py
+settings_local.py
+
+# =============================================================================
+# PACKAGE MANAGER ARTIFACTS
+# =============================================================================
+# Homebrew
+Brewfile.lock.json
+
+# APT/dpkg
+*.deb
+*.rpm
+
+# Flatpak
+.flatpak-builder/
+
+# =============================================================================
+# SYSTEM SPECIFIC
+# =============================================================================
+# Linux
+.gvfs
+.xsession-errors*
+
+# macOS
+.CFUserTextEncoding
+.Trash/
+Network Trash Folder
+Temporary Items
+.apdisk
+
+# Windows
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msm
+*.msp
+*.lnk
+
+# =============================================================================
+# IDE AND EDITOR SPECIFIC
+# =============================================================================
+# VSCode
+.vscode/settings.json
+.vscode/launch.json
+.vscode/extensions.json
+.vscode/.ropeproject
+
+# JetBrains IDEs
+.idea/
+*.iws
+*.iml
+*.ipr
+
+# Sublime Text
+*.sublime-workspace
+*.sublime-project
+
+# =============================================================================
+# DOTFILES SPECIFIC EXCLUSIONS
+# =============================================================================
+# Installation state tracking
+.install_state
+.setup_complete
+install_progress.json
+
+# Generated files
+generated/
+auto-generated/
+
+# Large binary files that might accidentally get copied
+*.iso
+*.dmg
+*.img
+*.bin
+*.exe
+*.msi
+*.deb
+*.rpm
+*.tar.gz
+*.tar.bz2
+*.tar.xz
+*.zip
+*.7z
+*.rar
+
+# =============================================================================
+# SCRIPT EXECUTION ARTIFACTS
+# =============================================================================
+# Process IDs
+*.pid
+*.lock
+
+# Temporary script files
+temp_*
+tmp_*
+.temp_*
+.tmp_*
+
+# Script outputs
+output/
+results/
+reports/
+
+# =============================================================================
+# SECURITY SENSITIVE
+# =============================================================================
+# API keys and tokens
+.token
+.api_key
+*.token
+*_token
+api_keys.txt
+secrets.txt
+
+# Browser saved passwords/sessions
+.mozilla/
+.firefox/
+.chrome/
+.chromium/
+
+# Application specific secrets
+.docker/config.json
+.aws/credentials
+.gcp/
+.azure/
+
+# Audit files and hidden system files
+.d*
+.*-audit.json
+.*audit*
+
+# =============================================================================
+# END OF GITIGNORE
+# =============================================================================
