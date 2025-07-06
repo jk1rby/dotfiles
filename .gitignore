@@ -9,6 +9,7 @@ logs/*.log
 logs/**/*.log
 *.debug
 *.trace
+*.local.json
 
 # Script execution logs
 install_*.log

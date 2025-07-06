@@ -20,6 +20,8 @@ BACKUP_DIR="$HOME/.dotfiles_backup_$(date +%Y%m%d_%H%M%S)"
 LOG_DIR="$DOTFILES_DIR/logs"
 LOG_FILE="$LOG_DIR/install_$(date +%Y%m%d_%H%M%S).log"
 VERBOSE_LOGGING=true
+PROFILES_DIR="$DOTFILES_DIR/profiles"
+LOADED_PROFILE=""
 
 # System detection
 OS_TYPE=""
@@ -34,6 +36,9 @@ ENABLE_MACOS_SETUP=false
 ENABLE_WINDOWS_SETUP=false
 ENABLE_ROS2=false
 ENABLE_NVIDIA_SETUP=false
+
+# Installation flags
+FORCE_INSTALL=false
 
 # Initialize logging
 init_logging() {
@@ -136,6 +141,239 @@ log_command() {
 
 command_exists() {
     command -v "$1" >/dev/null 2>&1
+}
+
+# Idempotent package installation helpers
+is_package_installed() {
+    local package="$1"
+    
+    if [[ "$OS_TYPE" == "linux" ]]; then
+        if command_exists dpkg; then
+            dpkg -l | grep -q "^ii  $package " && return 0
+        elif command_exists rpm; then
+            rpm -q "$package" &>/dev/null && return 0
+        fi
+    elif [[ "$OS_TYPE" == "macos" ]]; then
+        if command_exists brew; then
+            brew list "$package" &>/dev/null && return 0
+        fi
+    elif [[ "$OS_TYPE" == "windows" ]]; then
+        if command_exists winget; then
+            winget list --id "$package" &>/dev/null && return 0
+        elif command_exists choco; then
+            choco list --local-only "$package" | grep -q "$package" && return 0
+        fi
+    fi
+    
+    # Also check if command exists (for cases where package name != command name)
+    command_exists "$package" && return 0
+    
+    return 1
+}
+
+install_package_idempotent() {
+    local package="$1"
+    local package_name="${2:-$package}"  # Optional display name
+    local force="${3:-false}"
+    
+    # Check if already installed (unless force is true)
+    if [[ "$force" != "true" ]] && is_package_installed "$package"; then
+        log_info "$package_name already installed ($(which $package 2>/dev/null || echo 'system package'))"
+        return 0
+    fi
+    
+    log_info "Installing $package_name..."
+    
+    if [[ "$OS_TYPE" == "linux" ]]; then
+        if command_exists apt; then
+            sudo apt install -y "$package" || {
+                log_warning "Failed to install $package_name"
+                return 1
+            }
+        elif command_exists yum; then
+            sudo yum install -y "$package" || {
+                log_warning "Failed to install $package_name"
+                return 1
+            }
+        elif command_exists dnf; then
+            sudo dnf install -y "$package" || {
+                log_warning "Failed to install $package_name"
+                return 1
+            }
+        fi
+    elif [[ "$OS_TYPE" == "macos" ]]; then
+        if command_exists brew; then
+            brew install "$package" || {
+                log_warning "Failed to install $package_name"
+                return 1
+            }
+        fi
+    elif [[ "$OS_TYPE" == "windows" ]]; then
+        if command_exists winget; then
+            winget install --id "$package" --silent --accept-source-agreements --accept-package-agreements || {
+                log_warning "Failed to install $package_name"
+                return 1
+            }
+        elif command_exists choco; then
+            choco install "$package" -y || {
+                log_warning "Failed to install $package_name"
+                return 1
+            }
+        fi
+    fi
+    
+    log_success "$package_name installed successfully"
+    return 0
+}
+
+# Idempotent directory creation
+create_directory_idempotent() {
+    local dir="$1"
+    local description="${2:-directory}"
+    
+    if [[ -d "$dir" ]]; then
+        log_info "$description already exists: $dir"
+        return 0
+    fi
+    
+    log_info "Creating $description: $dir"
+    if mkdir -p "$dir"; then
+        log_success "$description created successfully"
+        return 0
+    else
+        log_error "Failed to create $description: $dir"
+        return 1
+    fi
+}
+
+# Idempotent file download
+download_file_idempotent() {
+    local url="$1"
+    local destination="$2"
+    local description="${3:-file}"
+    local force="${4:-false}"
+    
+    if [[ "$force" != "true" ]] && [[ -f "$destination" ]]; then
+        log_info "$description already downloaded: $destination"
+        return 0
+    fi
+    
+    log_info "Downloading $description from $url..."
+    
+    # Create parent directory if needed
+    local parent_dir=$(dirname "$destination")
+    create_directory_idempotent "$parent_dir" "parent directory"
+    
+    if command_exists wget; then
+        wget -q "$url" -O "$destination" || {
+            log_error "Failed to download $description"
+            rm -f "$destination"  # Clean up partial download
+            return 1
+        }
+    elif command_exists curl; then
+        curl -fsSL "$url" -o "$destination" || {
+            log_error "Failed to download $description"
+            rm -f "$destination"  # Clean up partial download
+            return 1
+        }
+    else
+        log_error "Neither wget nor curl available for downloading"
+        return 1
+    fi
+    
+    log_success "$description downloaded successfully"
+    return 0
+}
+
+# Idempotent git clone
+clone_repository_idempotent() {
+    local repo_url="$1"
+    local destination="$2"
+    local description="${3:-repository}"
+    local force="${4:-false}"
+    
+    if [[ "$force" != "true" ]] && [[ -d "$destination/.git" ]]; then
+        log_info "$description already cloned: $destination"
+        
+        # Optionally update the repository
+        log_info "Updating $description..."
+        cd "$destination" && git pull --quiet || log_warning "Failed to update $description"
+        cd - >/dev/null
+        
+        return 0
+    fi
+    
+    # Remove destination if it exists but is not a git repo
+    if [[ -d "$destination" ]] && [[ ! -d "$destination/.git" ]]; then
+        log_warning "Directory exists but is not a git repository: $destination"
+        log_info "Removing and re-cloning..."
+        rm -rf "$destination"
+    fi
+    
+    log_info "Cloning $description from $repo_url..."
+    
+    # Create parent directory if needed
+    local parent_dir=$(dirname "$destination")
+    create_directory_idempotent "$parent_dir" "parent directory"
+    
+    if git clone --quiet "$repo_url" "$destination"; then
+        log_success "$description cloned successfully"
+        return 0
+    else
+        log_error "Failed to clone $description"
+        return 1
+    fi
+}
+
+# Idempotent symlink creation
+create_symlink_idempotent() {
+    local source="$1"
+    local target="$2"
+    local description="${3:-symlink}"
+    local force="${4:-false}"
+    
+    # Check if source exists
+    if [[ ! -e "$source" ]]; then
+        log_error "Source does not exist for $description: $source"
+        return 1
+    fi
+    
+    # Check if target already exists and is correct
+    if [[ -L "$target" ]]; then
+        local current_source=$(readlink "$target")
+        if [[ "$current_source" == "$source" ]]; then
+            log_info "$description already correctly linked: $target -> $source"
+            return 0
+        else
+            log_warning "$description exists but points elsewhere: $target -> $current_source"
+            if [[ "$force" == "true" ]]; then
+                log_info "Removing incorrect symlink..."
+                rm -f "$target"
+            else
+                log_error "Use --force to overwrite existing symlink"
+                return 1
+            fi
+        fi
+    elif [[ -e "$target" ]]; then
+        log_warning "$description target exists and is not a symlink: $target"
+        if [[ "$force" == "true" ]]; then
+            log_info "Backing up existing file..."
+            mv "$target" "$target.backup.$(date +%Y%m%d_%H%M%S)"
+        else
+            log_error "Use --force to backup and overwrite existing file"
+            return 1
+        fi
+    fi
+    
+    # Create the symlink
+    log_info "Creating $description: $target -> $source"
+    if ln -sf "$source" "$target"; then
+        log_success "$description created successfully"
+        return 0
+    else
+        log_error "Failed to create $description"
+        return 1
+    fi
 }
 
 # Log system information
@@ -434,6 +672,644 @@ validate_prerequisites() {
     else
         log_success "All prerequisites validated"
     fi
+}
+
+# Comprehensive preflight checks for system readiness
+preflight_check() {
+    log_section "Preflight System Checks"
+    
+    local errors=0
+    local warnings=0
+    
+    # 1. Disk Space Check
+    log_info "Checking available disk space..."
+    local home_partition=$(df "$HOME" | tail -1 | awk '{print $1}')
+    local available_space_kb=$(df "$HOME" | tail -1 | awk '{print $4}')
+    local available_space_gb=$((available_space_kb / 1024 / 1024))
+    
+    if [[ $available_space_gb -lt 5 ]]; then
+        log_error "Insufficient disk space: ${available_space_gb}GB available (5GB minimum required)"
+        log_info "  Partition: $home_partition"
+        log_info "  Consider freeing up space before installation"
+        ((errors++))
+    elif [[ $available_space_gb -lt 10 ]]; then
+        log_warning "Low disk space: ${available_space_gb}GB available (10GB recommended)"
+        ((warnings++))
+    else
+        log_success "Disk space OK: ${available_space_gb}GB available"
+    fi
+    
+    # 2. Network Connectivity Check
+    log_info "Checking network connectivity..."
+    local network_ok=true
+    
+    # Check multiple endpoints for reliability
+    local endpoints=("github.com" "raw.githubusercontent.com" "google.com")
+    local failed_endpoints=()
+    
+    for endpoint in "${endpoints[@]}"; do
+        if ! ping -c 1 -W 2 "$endpoint" &>/dev/null; then
+            failed_endpoints+=("$endpoint")
+            network_ok=false
+        fi
+    done
+    
+    if [[ "$network_ok" == "false" ]]; then
+        if [[ ${#failed_endpoints[@]} -eq ${#endpoints[@]} ]]; then
+            log_error "No network connectivity detected"
+            log_info "  Failed to reach: ${failed_endpoints[*]}"
+            log_info "  Please check your internet connection"
+            ((errors++))
+        else
+            log_warning "Partial network connectivity issues"
+            log_info "  Failed to reach: ${failed_endpoints[*]}"
+            ((warnings++))
+        fi
+    else
+        log_success "Network connectivity OK"
+    fi
+    
+    # 3. Git Configuration Check
+    log_info "Checking Git configuration..."
+    local git_user=$(git config --global user.name 2>/dev/null || echo "")
+    local git_email=$(git config --global user.email 2>/dev/null || echo "")
+    
+    if [[ -z "$git_user" ]]; then
+        log_warning "Git user.name not configured"
+        log_info "  Run: git config --global user.name \"Your Name\""
+        ((warnings++))
+    else
+        log_success "Git user configured: $git_user"
+    fi
+    
+    if [[ -z "$git_email" ]]; then
+        log_warning "Git user.email not configured"
+        log_info "  Run: git config --global user.email \"your.email@example.com\""
+        ((warnings++))
+    else
+        log_success "Git email configured: $git_email"
+    fi
+    
+    # 4. Shell Environment Check
+    log_info "Checking shell environment..."
+    if [[ -n "$SHELL" ]]; then
+        log_success "Current shell: $SHELL"
+        
+        # Check if running in restricted shell
+        if [[ "$SHELL" == *"rbash"* ]] || [[ "$SHELL" == *"rksh"* ]]; then
+            log_warning "Running in restricted shell - some features may not work"
+            ((warnings++))
+        fi
+    else
+        log_warning "SHELL environment variable not set"
+        ((warnings++))
+    fi
+    
+    # 5. Permission Checks
+    log_info "Checking permissions..."
+    
+    # Check if we can write to home directory
+    if ! touch "$HOME/.dotfiles_test_$$" 2>/dev/null; then
+        log_error "Cannot write to home directory: $HOME"
+        ((errors++))
+    else
+        rm -f "$HOME/.dotfiles_test_$$"
+        log_success "Home directory writable"
+    fi
+    
+    # Check sudo availability (Linux/macOS)
+    if [[ "$OS_TYPE" == "linux" ]] || [[ "$OS_TYPE" == "macos" ]]; then
+        if command_exists sudo; then
+            if sudo -n true 2>/dev/null; then
+                log_success "Passwordless sudo available"
+            else
+                log_info "Sudo available (password will be required)"
+            fi
+        else
+            log_warning "Sudo not available - some installations may fail"
+            ((warnings++))
+        fi
+    fi
+    
+    # 6. Existing Installation Check
+    log_info "Checking for existing installations..."
+    local existing_installs=0
+    
+    if [[ -L "$HOME/.zshrc" ]] && [[ "$(readlink "$HOME/.zshrc")" == *"dotfiles"* ]]; then
+        log_info "Found existing dotfiles installation (zsh)"
+        ((existing_installs++))
+    fi
+    
+    if [[ -L "$HOME/.gitconfig" ]] && [[ "$(readlink "$HOME/.gitconfig")" == *"dotfiles"* ]]; then
+        log_info "Found existing dotfiles installation (git)"
+        ((existing_installs++))
+    fi
+    
+    if [[ $existing_installs -gt 0 ]]; then
+        log_warning "Found $existing_installs existing dotfile symlinks"
+        log_info "  The installer will handle conflicts gracefully"
+    else
+        log_success "No existing dotfiles installation detected"
+    fi
+    
+    # 7. System Resource Check
+    log_info "Checking system resources..."
+    
+    # Memory check
+    if [[ "$OS_TYPE" == "linux" ]]; then
+        local total_mem_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+        local total_mem_gb=$((total_mem_kb / 1024 / 1024))
+        
+        if [[ $total_mem_gb -lt 2 ]]; then
+            log_warning "Low memory: ${total_mem_gb}GB (2GB minimum recommended)"
+            ((warnings++))
+        else
+            log_success "Memory OK: ${total_mem_gb}GB available"
+        fi
+    elif [[ "$OS_TYPE" == "macos" ]]; then
+        local total_mem_bytes=$(sysctl -n hw.memsize)
+        local total_mem_gb=$((total_mem_bytes / 1024 / 1024 / 1024))
+        
+        if [[ $total_mem_gb -lt 4 ]]; then
+            log_warning "Low memory: ${total_mem_gb}GB (4GB minimum recommended)"
+            ((warnings++))
+        else
+            log_success "Memory OK: ${total_mem_gb}GB available"
+        fi
+    fi
+    
+    # 8. Package Manager Availability
+    log_info "Checking package managers..."
+    
+    if [[ "$OS_TYPE" == "linux" ]]; then
+        if command_exists apt; then
+            log_success "APT package manager available"
+        elif command_exists yum; then
+            log_info "YUM package manager available (limited support)"
+        elif command_exists dnf; then
+            log_info "DNF package manager available (limited support)"
+        else
+            log_error "No supported package manager found"
+            ((errors++))
+        fi
+    elif [[ "$OS_TYPE" == "macos" ]]; then
+        if command_exists brew; then
+            log_success "Homebrew available"
+        else
+            log_info "Homebrew not found (will be installed)"
+        fi
+    elif [[ "$OS_TYPE" == "windows" ]]; then
+        if command_exists winget; then
+            log_success "Windows Package Manager (winget) available"
+        elif command_exists choco; then
+            log_success "Chocolatey available"
+        else
+            log_warning "No package manager found (manual installation may be required)"
+            ((warnings++))
+        fi
+    fi
+    
+    # Summary
+    echo
+    log_info "Preflight Check Summary:"
+    log_info "  Errors: $errors"
+    log_info "  Warnings: $warnings"
+    
+    if [[ $errors -gt 0 ]]; then
+        log_error "❌ Preflight checks failed with $errors error(s)"
+        log_info "Please resolve the errors above before continuing"
+        
+        # Ask user if they want to continue anyway
+        if [[ "$FORCE_INSTALL" != "true" ]]; then
+            read -p "Do you want to continue anyway? (not recommended) [y/N] " -n 1 -r
+            echo
+            if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+                log_info "Installation cancelled"
+                exit 1
+            else
+                log_warning "Continuing despite errors (forced by user)"
+            fi
+        else
+            log_warning "Continuing despite errors (--force flag used)"
+        fi
+    elif [[ $warnings -gt 0 ]]; then
+        log_warning "⚠️  Preflight checks completed with $warnings warning(s)"
+        log_info "Installation can proceed, but some features may be limited"
+    else
+        log_success "✅ All preflight checks passed!"
+    fi
+    
+    return 0
+}
+
+# Profile management functions
+load_profile() {
+    local profile_name="$1"
+    local profile_path="$PROFILES_DIR/${profile_name}.profile"
+    
+    if [[ ! -f "$profile_path" ]]; then
+        log_error "Profile not found: $profile_path"
+        log_info "Available profiles:"
+        ls "$PROFILES_DIR"/*.profile 2>/dev/null | while read -r p; do
+            log_info "  - $(basename "$p" .profile)"
+        done
+        return 1
+    fi
+    
+    log_info "Loading machine profile: $profile_name"
+    
+    # Source the profile
+    source "$profile_path" || {
+        log_error "Failed to load profile: $profile_name"
+        return 1
+    }
+    
+    LOADED_PROFILE="$profile_name"
+    log_success "Profile loaded: $profile_name"
+    log_info "Profile description: $PROFILE_DESCRIPTION"
+    
+    # Run profile pre-install if defined
+    if declare -f profile_pre_install >/dev/null; then
+        log_info "Running profile pre-install setup..."
+        profile_pre_install
+    fi
+    
+    return 0
+}
+
+detect_machine_profile() {
+    log_section "Machine Profile Detection"
+    
+    # Check if profile already specified
+    if [[ -n "$MACHINE_PROFILE" ]]; then
+        log_info "Profile specified via environment: $MACHINE_PROFILE"
+        load_profile "$MACHINE_PROFILE"
+        return $?
+    fi
+    
+    # Auto-detect based on system characteristics
+    local detected_profile=""
+    
+    if [[ "$OS_TYPE" == "linux" ]]; then
+        # Check for RTX 4090 desktop
+        if [[ "$IS_RTX4090_SYSTEM" == "true" ]]; then
+            detected_profile="desktop-rtx4090"
+            log_info "Detected RTX 4090 system - suggesting desktop profile"
+        # Check for server/headless
+        elif [[ ! -v DISPLAY ]] || [[ -z "$DISPLAY" ]]; then
+            detected_profile="server-minimal"
+            log_info "No display detected - suggesting server profile"
+        # Check for VM/container
+        elif systemd-detect-virt -q 2>/dev/null; then
+            detected_profile="server-minimal"
+            log_info "Virtual environment detected - suggesting minimal profile"
+        fi
+    elif [[ "$OS_TYPE" == "macos" ]]; then
+        # Check for Apple Silicon
+        if [[ "$ARCH" == "arm64" ]]; then
+            detected_profile="macbook-m1"
+            log_info "Apple Silicon Mac detected - suggesting MacBook profile"
+        fi
+    fi
+    
+    # If we detected a profile, offer to use it
+    if [[ -n "$detected_profile" ]]; then
+        log_info "Suggested profile: $detected_profile"
+        echo
+        read -p "Use detected profile '$detected_profile'? (Y/n): " -r
+        echo
+        if [[ ! $REPLY =~ ^[Nn]$ ]]; then
+            load_profile "$detected_profile"
+            return $?
+        fi
+    fi
+    
+    # Otherwise, show available profiles
+    log_info "Available machine profiles:"
+    local profiles=()
+    while IFS= read -r profile_file; do
+        local profile_name=$(basename "$profile_file" .profile)
+        profiles+=("$profile_name")
+        
+        # Source profile temporarily to get description
+        local desc=""
+        if source "$profile_file" 2>/dev/null && [[ -n "$PROFILE_DESCRIPTION" ]]; then
+            desc=" - $PROFILE_DESCRIPTION"
+        fi
+        
+        log_info "  • $profile_name$desc"
+    done < <(find "$PROFILES_DIR" -name "*.profile" -type f | sort)
+    
+    # Ask user to select
+    echo
+    read -p "Enter profile name (or press Enter to skip): " selected_profile
+    
+    if [[ -n "$selected_profile" ]]; then
+        load_profile "$selected_profile"
+    else
+        log_info "No profile selected - using default configuration"
+    fi
+}
+
+# Apply profile-specific package installations
+apply_profile_packages() {
+    if [[ -z "$LOADED_PROFILE" ]]; then
+        return 0
+    fi
+    
+    log_section "Installing Profile-Specific Packages"
+    
+    # Install desktop packages if defined
+    if [[ -n "${DESKTOP_PACKAGES[@]}" ]] && [[ "$MACHINE_TYPE" == "desktop" ]]; then
+        log_info "Installing desktop packages..."
+        for package in "${DESKTOP_PACKAGES[@]}"; do
+            install_package_idempotent "$package" "$package"
+        done
+    fi
+    
+    # Install server packages if defined
+    if [[ -n "${SERVER_PACKAGES[@]}" ]] && [[ "$MACHINE_TYPE" == "server" ]]; then
+        log_info "Installing server packages..."
+        for package in "${SERVER_PACKAGES[@]}"; do
+            install_package_idempotent "$package" "$package"
+        done
+    fi
+    
+    # Install Homebrew packages for macOS
+    if [[ "$OS_TYPE" == "macos" ]] && [[ -n "${BREW_PACKAGES[@]}" ]]; then
+        log_info "Installing Homebrew packages..."
+        for package in "${BREW_PACKAGES[@]}"; do
+            install_package_idempotent "$package" "$package"
+        done
+    fi
+    
+    # Install Homebrew cask packages for macOS
+    if [[ "$OS_TYPE" == "macos" ]] && [[ -n "${BREW_CASK_PACKAGES[@]}" ]]; then
+        log_info "Installing Homebrew cask packages..."
+        for package in "${BREW_CASK_PACKAGES[@]}"; do
+            if ! brew list --cask "$package" &>/dev/null; then
+                log_info "Installing $package..."
+                brew install --cask "$package" || log_warning "Failed to install $package"
+            else
+                log_info "$package already installed"
+            fi
+        done
+    fi
+}
+
+# Restore point and rollback functionality
+create_restore_point() {
+    local name="${1:-auto}"
+    local timestamp=$(date +%Y%m%d_%H%M%S)
+    local restore_dir="$HOME/.dotfiles_restore/${name}-${timestamp}"
+    
+    log_section "Creating Restore Point: $name"
+    
+    # Create restore directory
+    if ! create_directory_idempotent "$restore_dir" "restore point directory"; then
+        log_error "Failed to create restore point directory"
+        return 1
+    fi
+    
+    # Save current dotfiles state
+    log_info "Saving current dotfiles state..."
+    
+    # Save list of stowed packages
+    if command_exists stow; then
+        cd "$DOTFILES_DIR"
+        local stowed_packages=()
+        for package in zsh git tmux nvim; do
+            if [[ -L "$HOME/.$(basename $package)" ]] || [[ -L "$HOME/.config/$(basename $package)" ]]; then
+                stowed_packages+=("$package")
+            fi
+        done
+        echo "${stowed_packages[@]}" > "$restore_dir/stowed_packages.txt"
+        log_info "Saved stowed packages: ${stowed_packages[*]}"
+    fi
+    
+    # Save current configurations
+    local configs_to_save=(
+        "$HOME/.zshrc"
+        "$HOME/.bashrc"
+        "$HOME/.gitconfig"
+        "$HOME/.gitignore_global"
+        "$HOME/.tmux.conf"
+        "$HOME/.config/nvim"
+    )
+    
+    for config in "${configs_to_save[@]}"; do
+        if [[ -e "$config" ]]; then
+            local config_name=$(basename "$config")
+            if [[ -d "$config" ]]; then
+                log_info "Backing up directory: $config_name"
+                cp -rL "$config" "$restore_dir/$config_name" 2>/dev/null || log_warning "Failed to backup $config_name"
+            else
+                log_info "Backing up file: $config_name"
+                cp -L "$config" "$restore_dir/$config_name" 2>/dev/null || log_warning "Failed to backup $config_name"
+            fi
+        fi
+    done
+    
+    # Save system package list (for reference)
+    if [[ "$OS_TYPE" == "linux" ]]; then
+        if command_exists dpkg; then
+            dpkg -l > "$restore_dir/packages_dpkg.txt"
+        fi
+        if command_exists snap; then
+            snap list > "$restore_dir/packages_snap.txt" 2>/dev/null
+        fi
+    elif [[ "$OS_TYPE" == "macos" ]]; then
+        if command_exists brew; then
+            brew list > "$restore_dir/packages_brew.txt"
+            brew list --cask > "$restore_dir/packages_brew_cask.txt" 2>/dev/null
+        fi
+    fi
+    
+    # Save metadata
+    cat > "$restore_dir/metadata.txt" << EOF
+Restore Point: $name
+Created: $(date)
+Hostname: $(hostname)
+User: $(whoami)
+OS: $OS_TYPE $OS_VERSION
+Profile: ${LOADED_PROFILE:-none}
+Script Version: $(git -C "$DOTFILES_DIR" rev-parse --short HEAD 2>/dev/null || echo "unknown")
+EOF
+    
+    # Create restore script
+    cat > "$restore_dir/restore.sh" << 'EOF'
+#!/bin/bash
+# Restore script for this restore point
+
+RESTORE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DOTFILES_DIR="$HOME/dotfiles"
+
+echo "Restoring from: $RESTORE_DIR"
+echo "This will restore your dotfiles to the state saved at: $(grep Created "$RESTORE_DIR/metadata.txt" | cut -d' ' -f2-)"
+echo
+read -p "Are you sure you want to restore? (y/N): " -r
+if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+    echo "Restore cancelled"
+    exit 1
+fi
+
+# Unstow current dotfiles
+if command -v stow >/dev/null 2>&1 && [[ -f "$RESTORE_DIR/stowed_packages.txt" ]]; then
+    cd "$DOTFILES_DIR"
+    for package in zsh git tmux nvim; do
+        stow -D "$package" 2>/dev/null
+    done
+fi
+
+# Restore backed up files
+for file in "$RESTORE_DIR"/*; do
+    filename=$(basename "$file")
+    case "$filename" in
+        metadata.txt|restore.sh|stowed_packages.txt|packages_*.txt)
+            continue
+            ;;
+        nvim)
+            mkdir -p "$HOME/.config"
+            rm -rf "$HOME/.config/nvim"
+            cp -r "$file" "$HOME/.config/nvim"
+            echo "Restored: .config/nvim"
+            ;;
+        *)
+            cp -f "$file" "$HOME/.$filename"
+            echo "Restored: .$filename"
+            ;;
+    esac
+done
+
+echo
+echo "Restore complete!"
+echo "You may need to restart your terminal for changes to take effect."
+EOF
+    
+    chmod +x "$restore_dir/restore.sh"
+    
+    # Save restore point info
+    echo "$restore_dir" >> "$HOME/.dotfiles_restore/restore_points.log"
+    
+    log_success "Restore point created: $restore_dir"
+    log_info "To restore, run: $restore_dir/restore.sh"
+    
+    return 0
+}
+
+list_restore_points() {
+    log_section "Available Restore Points"
+    
+    if [[ ! -d "$HOME/.dotfiles_restore" ]] || [[ ! -f "$HOME/.dotfiles_restore/restore_points.log" ]]; then
+        log_info "No restore points found"
+        return 1
+    fi
+    
+    local count=0
+    while IFS= read -r restore_dir; do
+        if [[ -d "$restore_dir" ]] && [[ -f "$restore_dir/metadata.txt" ]]; then
+            ((count++))
+            echo
+            echo "[$count] $(basename "$restore_dir")"
+            grep -E "^(Created|Profile|Hostname):" "$restore_dir/metadata.txt" | sed 's/^/    /'
+        fi
+    done < "$HOME/.dotfiles_restore/restore_points.log"
+    
+    if [[ $count -eq 0 ]]; then
+        log_info "No valid restore points found"
+        return 1
+    fi
+    
+    return 0
+}
+
+restore_from_point() {
+    local point_name="$1"
+    
+    if [[ -z "$point_name" ]]; then
+        # Interactive selection
+        if ! list_restore_points; then
+            return 1
+        fi
+        
+        echo
+        read -p "Enter restore point number or name: " selection
+        
+        if [[ "$selection" =~ ^[0-9]+$ ]]; then
+            # Numeric selection
+            local count=0
+            while IFS= read -r restore_dir; do
+                if [[ -d "$restore_dir" ]]; then
+                    ((count++))
+                    if [[ $count -eq $selection ]]; then
+                        point_name="$restore_dir"
+                        break
+                    fi
+                fi
+            done < "$HOME/.dotfiles_restore/restore_points.log"
+        else
+            # Name selection
+            point_name="$HOME/.dotfiles_restore/$selection"
+        fi
+    else
+        # Direct path or name provided
+        if [[ ! "$point_name" =~ ^/ ]]; then
+            point_name="$HOME/.dotfiles_restore/$point_name"
+        fi
+    fi
+    
+    if [[ ! -d "$point_name" ]] || [[ ! -f "$point_name/restore.sh" ]]; then
+        log_error "Invalid restore point: $point_name"
+        return 1
+    fi
+    
+    log_info "Restoring from: $point_name"
+    bash "$point_name/restore.sh"
+}
+
+cleanup_old_restore_points() {
+    local keep_count="${1:-5}"
+    
+    log_info "Cleaning up old restore points (keeping $keep_count most recent)..."
+    
+    if [[ ! -f "$HOME/.dotfiles_restore/restore_points.log" ]]; then
+        return 0
+    fi
+    
+    # Get list of valid restore points sorted by date
+    local valid_points=()
+    while IFS= read -r restore_dir; do
+        if [[ -d "$restore_dir" ]]; then
+            valid_points+=("$restore_dir")
+        fi
+    done < "$HOME/.dotfiles_restore/restore_points.log"
+    
+    local total=${#valid_points[@]}
+    if [[ $total -le $keep_count ]]; then
+        log_info "Only $total restore points exist, no cleanup needed"
+        return 0
+    fi
+    
+    # Remove oldest restore points
+    local remove_count=$((total - keep_count))
+    log_info "Removing $remove_count old restore points..."
+    
+    for ((i=0; i<$remove_count; i++)); do
+        local old_point="${valid_points[$i]}"
+        if [[ -d "$old_point" ]]; then
+            log_info "Removing: $(basename "$old_point")"
+            rm -rf "$old_point"
+        fi
+    done
+    
+    # Rebuild restore points log
+    local temp_log=$(mktemp)
+    for ((i=$remove_count; i<$total; i++)); do
+        echo "${valid_points[$i]}" >> "$temp_log"
+    done
+    mv "$temp_log" "$HOME/.dotfiles_restore/restore_points.log"
+    
+    log_success "Cleanup complete"
 }
 
 # Archive existing dotfiles with .old suffix for safety
@@ -861,10 +1737,7 @@ install_dependencies() {
             )
             
             for package in "${packages[@]}"; do
-                if ! command_exists "$package" && ! dpkg -l | grep -q "^ii  $package "; then
-                    log_info "Installing $package..."
-                    $SUDO apt install -y "$package" || log_warning "Failed to install $package"
-                fi
+                install_package_idempotent "$package" "$package"
             done
             
         else
@@ -897,10 +1770,7 @@ install_dependencies() {
         local packages=("stow" "git" "neovim" "tmux" "zsh")
         
         for package in "${packages[@]}"; do
-            if ! command_exists "$package"; then
-                log_info "Installing $package..."
-                brew install "$package" || log_warning "Failed to install $package"
-            fi
+            install_package_idempotent "$package" "$package"
         done
     
     elif [[ "$OS_TYPE" == "windows" ]]; then
@@ -911,11 +1781,15 @@ install_dependencies() {
             log_info "Using winget package manager..."
             
             # Essential packages via winget
-            local packages=("Git.Git" "Neovim.Neovim")
+            local packages=(
+                "Git.Git:Git"
+                "Neovim.Neovim:Neovim"
+            )
             
-            for package in "${packages[@]}"; do
-                log_info "Installing $package..."
-                winget install --id "$package" --silent --accept-source-agreements --accept-package-agreements || log_warning "Failed to install $package"
+            for package_spec in "${packages[@]}"; do
+                local package_id="${package_spec%%:*}"
+                local package_name="${package_spec##*:}"
+                install_package_idempotent "$package_id" "$package_name"
             done
             
         elif command_exists choco; then
@@ -925,8 +1799,7 @@ install_dependencies() {
             local packages=("git" "neovim" "powershell-core")
             
             for package in "${packages[@]}"; do
-                log_info "Installing $package..."
-                choco install "$package" -y || log_warning "Failed to install $package"
+                install_package_idempotent "$package" "$package"
             done
             
         else
@@ -2014,7 +2887,7 @@ windows_obsidian_setup() {
 install_shell_framework() {
     log_section "Shell Framework Installation"
     
-    # Install Oh-My-Zsh
+    # Install Oh-My-Zsh using idempotent approach
     if [[ ! -d "$HOME/.oh-my-zsh" ]]; then
         log_info "Installing Oh-My-Zsh..."
         sh -c "$(curl -fsSL https://raw.githubusercontent.com/ohmyzsh/ohmyzsh/master/tools/install.sh)" "" --unattended || {
@@ -2023,23 +2896,17 @@ install_shell_framework() {
         }
         log_success "Oh-My-Zsh installed"
     else
-        log_info "Oh-My-Zsh already installed"
+        log_info "Oh-My-Zsh already installed at $HOME/.oh-my-zsh"
     fi
     
-    # Install Powerlevel10k theme
+    # Install Powerlevel10k theme using idempotent git clone
     local p10k_dir="${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/themes/powerlevel10k"
-    if [[ ! -d "$p10k_dir" ]]; then
-        log_info "Installing Powerlevel10k theme..."
-        git clone --depth=1 https://github.com/romkatv/powerlevel10k.git "$p10k_dir" || {
-            log_warning "Powerlevel10k installation failed"
-            return 1
-        }
-        log_success "Powerlevel10k installed"
-    else
-        log_info "Powerlevel10k already installed"
-    fi
+    clone_repository_idempotent \
+        "https://github.com/romkatv/powerlevel10k.git" \
+        "$p10k_dir" \
+        "Powerlevel10k theme"
     
-    # Install Zsh plugins
+    # Install Zsh plugins using idempotent git clone
     local plugins_dir="${ZSH_CUSTOM:-$HOME/.oh-my-zsh/custom}/plugins"
     
     local plugins=(
@@ -2053,16 +2920,10 @@ install_shell_framework() {
         local plugin_url="${plugin_info#*|}"
         local plugin_dir="$plugins_dir/$plugin_name"
         
-        if [[ ! -d "$plugin_dir" ]]; then
-            log_info "Installing $plugin_name..."
-            git clone "$plugin_url" "$plugin_dir" || {
-                log_warning "$plugin_name installation failed"
-                continue
-            }
-            log_success "$plugin_name installed"
-        else
-            log_info "$plugin_name already installed"
-        fi
+        clone_repository_idempotent \
+            "$plugin_url" \
+            "$plugin_dir" \
+            "$plugin_name plugin"
     done
     
     # Clean up any broken plugin directories with :https suffix
@@ -2240,8 +3101,8 @@ install_nerd_fonts() {
     
     log_info "Installing Nerd Fonts for proper icon display..."
     
-    # Create fonts directory
-    mkdir -p ~/.local/share/fonts
+    # Create fonts directory using idempotent helper
+    create_directory_idempotent ~/.local/share/fonts "fonts directory"
     
     # Download and install essential Nerd Fonts (FiraCode only for reliability)
     local fonts=(
@@ -2252,30 +3113,54 @@ install_nerd_fonts() {
     local fonts_installed=0
     
     for font in "${fonts[@]}"; do
-        if [[ ! -f ~/.local/share/fonts/${font}*.ttf ]]; then
-            log_info "Installing $font Nerd Font..."
-            
-            if run_with_timeout 60 "nerd-font-$font" wget -q --timeout=30 --tries=2 "https://github.com/ryanoasis/nerd-fonts/releases/download/${font_version}/${font}.zip" -O "/tmp/${font}.zip"; then
-                log_info "Extracting $font (this may take a moment)..."
-                if run_with_timeout 60 "unzip-$font" unzip -q "/tmp/${font}.zip" -d "/tmp/${font}/" 2>/dev/null; then
-                    # Copy TTF files, ignoring errors for fonts without TTF variants
-                    if cp "/tmp/${font}"/*.ttf ~/.local/share/fonts/ 2>/dev/null || cp "/tmp/${font}"/*.otf ~/.local/share/fonts/ 2>/dev/null; then
-                        log_success "$font Nerd Font installed"
-                        ((fonts_installed++))
-                    else
-                        log_warning "$font: No TTF/OTF files found"
-                    fi
-                else
-                    log_warning "Failed to extract $font (timeout or corruption)"
-                fi
-                # Cleanup
-                rm -rf "/tmp/${font}"* 2>/dev/null || true
-            else
-                log_warning "Failed to download $font (timeout or network issue)"
-            fi
-        else
+        # Check if font already installed
+        if ls ~/.local/share/fonts/${font}*.ttf 2>/dev/null | grep -q .; then
             log_info "$font Nerd Font already installed"
             ((fonts_installed++))
+            continue
+        fi
+        
+        log_info "Installing $font Nerd Font..."
+        
+        # Download font using idempotent helper
+        local font_url="https://github.com/ryanoasis/nerd-fonts/releases/download/${font_version}/${font}.zip"
+        local font_zip="/tmp/${font}.zip"
+        
+        if download_file_idempotent "$font_url" "$font_zip" "$font Nerd Font"; then
+            log_info "Extracting $font (this may take a moment)..."
+            
+            # Create temporary extraction directory
+            local extract_dir="/tmp/${font}_extract"
+            create_directory_idempotent "$extract_dir" "extraction directory"
+            
+            if run_with_timeout 60 "unzip-$font" unzip -q "$font_zip" -d "$extract_dir" 2>/dev/null; then
+                # Copy TTF/OTF files, ignoring errors for fonts without TTF variants
+                local font_files_copied=0
+                
+                # Try TTF files first
+                if ls "$extract_dir"/*.ttf 2>/dev/null | grep -q .; then
+                    cp "$extract_dir"/*.ttf ~/.local/share/fonts/ 2>/dev/null && font_files_copied=1
+                fi
+                
+                # Try OTF files if no TTF found
+                if [[ $font_files_copied -eq 0 ]] && ls "$extract_dir"/*.otf 2>/dev/null | grep -q .; then
+                    cp "$extract_dir"/*.otf ~/.local/share/fonts/ 2>/dev/null && font_files_copied=1
+                fi
+                
+                if [[ $font_files_copied -eq 1 ]]; then
+                    log_success "$font Nerd Font installed"
+                    ((fonts_installed++))
+                else
+                    log_warning "$font: No TTF/OTF files found in archive"
+                fi
+            else
+                log_warning "Failed to extract $font (timeout or corruption)"
+            fi
+            
+            # Cleanup
+            rm -rf "$extract_dir" "$font_zip" 2>/dev/null || true
+        else
+            log_warning "Failed to download $font Nerd Font"
         fi
     done
     
@@ -2444,12 +3329,21 @@ show_usage() {
     echo
     echo "Options:"
     echo "  --force          Automatically resolve Stow conflicts"
+    echo "  --profile NAME   Use specific machine profile (desktop-rtx4090, macbook-m1, server-minimal)"
     echo "  --ubuntu-full    Enable full Ubuntu 22.04 setup (RTX 4090 + Z790)"
     echo "  --macos-full     Enable full macOS setup (Apple Silicon only)"
     echo "  --windows-full   Enable full Windows 11 setup"
     echo "  --minimal        Install only dotfiles (no system packages)"
     echo "  --unstow         Remove dotfiles and restore original configs"
     echo "  --health         Check dotfiles installation health"
+    echo
+    echo "Restore Point Options:"
+    echo "  --create-restore-point [NAME]  Create a restore point (default: manual)"
+    echo "  --list-restore-points          List available restore points"
+    echo "  --restore [NAME/NUMBER]        Restore from a specific point"
+    echo "  --cleanup-restore-points [N]   Keep only N most recent points (default: 5)"
+    echo
+    echo "Other Options:"
     echo "  --verbose        Enable verbose logging (default: enabled)"
     echo "  --no-verbose     Disable verbose logging"
     echo "  --help           Show this help message"
@@ -2468,13 +3362,19 @@ main() {
     local ubuntu_full_mode=false
     local macos_full_mode=false
     local windows_full_mode=false
+    local profile_name=""
     
     # Parse arguments
     while [[ $# -gt 0 ]]; do
         case $1 in
             --force)
                 force_mode=true
+                FORCE_INSTALL=true
                 shift
+                ;;
+            --profile)
+                profile_name="$2"
+                shift 2
                 ;;
             --minimal)
                 minimal_mode=true
@@ -2506,6 +3406,24 @@ main() {
                 ;;
             --health)
                 health_check
+                exit 0
+                ;;
+            --create-restore-point)
+                detect_system
+                create_restore_point "${2:-manual}"
+                exit 0
+                ;;
+            --list-restore-points)
+                list_restore_points
+                exit 0
+                ;;
+            --restore)
+                detect_system
+                restore_from_point "$2"
+                exit 0
+                ;;
+            --cleanup-restore-points)
+                cleanup_old_restore_points "${2:-5}"
                 exit 0
                 ;;
             --help)
@@ -2540,12 +3458,32 @@ main() {
     # Core setup flow
     detect_system
     validate_prerequisites
+    
+    # Load machine profile if specified or detect
+    if [[ -n "$profile_name" ]]; then
+        load_profile "$profile_name"
+    else
+        detect_machine_profile
+    fi
+    
+    # Run comprehensive preflight checks
+    preflight_check
+    
+    # Create automatic restore point before making changes
+    if [[ "$minimal_mode" != "true" ]]; then
+        log_info "Creating automatic restore point before installation..."
+        create_restore_point "pre-install" || log_warning "Failed to create restore point, continuing anyway"
+    fi
+    
     create_backup
     
     # Install software first, then configure it
     if [[ "$minimal_mode" != "true" ]]; then
         install_dependencies
         install_shell_framework
+        
+        # Apply profile-specific packages
+        apply_profile_packages
     fi
     
     # OS-specific software installation (before dotfiles configuration)
@@ -2588,14 +3526,28 @@ main() {
     verify_installation
     local verification_result=$?
     
+    # Run profile post-install if defined
+    if [[ -n "$LOADED_PROFILE" ]] && declare -f profile_post_install >/dev/null; then
+        log_section "Running Profile Post-Install"
+        profile_post_install
+    fi
+    
     # Success message
     log_section "Installation Complete!"
     
     if [[ $verification_result -eq 0 ]]; then
         echo -e "${GREEN}🎉 Dotfiles installation completed successfully!${NC}"
+        
+        # Clean up old restore points on successful installation
+        if [[ -d "$HOME/.dotfiles_restore" ]]; then
+            log_info "Cleaning up old restore points..."
+            cleanup_old_restore_points 5
+        fi
+        
         finalize_log 0
     else
         echo -e "${YELLOW}⚠️ Dotfiles installation completed with some issues!${NC}"
+        log_info "Restore points preserved due to installation issues"
         finalize_log $verification_result
     fi
     
